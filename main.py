@@ -127,7 +127,7 @@ async def finalize(interaction: discord.Interaction, winner_discord: discord.Mem
 
 # --- START THE BOT ---
 if __name__ == "__main__":
-    token = os.environ.get('DISCORD_TOKEN')
+    token = string(os.environ.get('DISCORD_TOKEN'))
     if token:
         keep_alive() # Starts the Flask web server
         bot.run(token)

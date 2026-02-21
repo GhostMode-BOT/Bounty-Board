@@ -2,6 +2,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import os
+import aiohttp
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageOps
 from flask import Flask
 from threading import Thread
 
@@ -13,7 +16,6 @@ def home():
     return "I am alive!"
 
 def run():
-    # Render uses the PORT environment variable
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -26,7 +28,7 @@ class BountyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True 
-        # Setting a custom activity status
+        self.session = None # To be initialized in setup_hook
         super().__init__(
             command_prefix="!", 
             intents=intents,
@@ -34,6 +36,8 @@ class BountyBot(commands.Bot):
         )
 
     async def setup_hook(self):
+        # Initialize aiohttp session for image downloading
+        self.session = aiohttp.ClientSession()
         await self.tree.sync()
         print(f"Synced slash commands for {self.user}")
 
@@ -46,6 +50,43 @@ active_bounty = {
     "setter": None,
     "proof_url": None
 }
+
+# --- HELPER FUNCTION: POSTER GENERATION ---
+async def create_wanted_poster(avatar_url):
+    try:
+        # 1. Download Avatar
+        async with bot.session.get(avatar_url) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.read()
+        
+        # 2. Process Image
+        avatar = Image.open(BytesIO(data)).convert("RGBA")
+        
+        # Create a parchment-colored background (400x500)
+        poster = Image.new('RGB', (400, 500), color=(225, 198, 153))
+        
+        # Resize avatar and make it Grayscale (old-timey look)
+        avatar = avatar.resize((250, 250))
+        avatar = ImageOps.grayscale(avatar)
+        avatar = ImageOps.expand(avatar, border=5, fill='black') # Small black border
+        
+        # Paste onto poster
+        poster.paste(avatar, (70, 100))
+        
+        # Draw "WANTED" text (simple fallback)
+        draw = ImageDraw.Draw(poster)
+        draw.text((160, 40), "WANTED", fill=(60, 40, 0))
+        draw.text((170, 60), "DEAD", fill=(60, 40, 0))
+
+        # Save to buffer
+        buffer = BytesIO()
+        poster.save(buffer, format="PNG")
+        buffer.seek(0)
+        return buffer
+    except Exception as e:
+        print(f"Poster error: {e}")
+        return None
 
 # --- SLASH COMMANDS ---
 
@@ -60,16 +101,30 @@ async def set_bounty(interaction: discord.Interaction, target_discord: discord.M
         await interaction.response.send_message("You cannot put a bounty on yourself!", ephemeral=True)
         return
 
+    # Defer response because image processing takes time
+    await interaction.response.defer()
+
     active_bounty = {
         "target_discord": target_discord, "target_mc": target_mc,
         "reward": reward, "setter": interaction.user, "proof_url": None
     }
-    embed = discord.Embed(title="⚔️ WANTED", color=discord.Color.dark_red())
+
+    # Generate Poster
+    poster_buffer = await create_wanted_poster(target_discord.display_avatar.url)
+    
+    embed = discord.Embed(title="⚔️ WANTED DEAD", color=discord.Color.dark_red())
     embed.add_field(name="Target (MC)", value=f"`{target_mc}`", inline=True)
     embed.add_field(name="Target (Discord)", value=target_discord.mention, inline=True)
     embed.add_field(name="Reward", value=f"💰 {reward}", inline=False)
-    embed.set_thumbnail(url=target_discord.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
+    
+    if poster_buffer:
+        file = discord.File(fp=poster_buffer, filename="wanted.png")
+        embed.set_image(url="attachment://wanted.png")
+        await interaction.followup.send(file=file, embed=embed)
+    else:
+        # Fallback if image fails
+        embed.set_thumbnail(url=target_discord.display_avatar.url)
+        await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="status", description="Check the details of the currently active bounty")
 async def status(interaction: discord.Interaction):
@@ -129,7 +184,7 @@ async def finalize(interaction: discord.Interaction, winner_discord: discord.Mem
 if __name__ == "__main__":
     token = os.environ.get('DISCORD_TOKEN')
     if token:
-        keep_alive()  # This starts the Flask web server
+        keep_alive()
         bot.run(token)
     else:
         print("ERROR: No DISCORD_TOKEN found in environment variables.")
